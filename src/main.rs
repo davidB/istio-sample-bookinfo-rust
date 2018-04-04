@@ -1,5 +1,8 @@
 #![deny(warnings)]
 
+extern crate env_logger;
+extern crate log;
+
 extern crate serde;
 #[macro_use]
 extern crate serde_derive;
@@ -110,6 +113,8 @@ fn index(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = error::Err
 }
 
 fn main() {
+    env_logger::init();
+
     HttpServer::new(|| {
         Application::new()
             .resource("/health", |r| r.method(Method::GET).f(health::health))
