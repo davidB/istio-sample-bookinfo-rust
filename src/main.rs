@@ -13,20 +13,7 @@ extern crate hyper;
 use hyper::header::Headers;
 
 use actix_web::{httpcodes, Application, HttpMessage, HttpRequest, HttpResponse, HttpServer, Method};
-
-#[derive(Debug, Serialize)]
-struct Health {
-    status: String,
-}
-
-pub fn health(_: HttpRequest) -> HttpResponse {
-    httpcodes::HTTPOk
-        .build()
-        .json(Health {
-            status: "Reviews is healthy".to_string(),
-        })
-        .unwrap()
-}
+mod health;
 
 #[derive(Debug, Serialize)]
 struct Product {
@@ -183,7 +170,7 @@ fn index(req: HttpRequest) -> HttpResponse {
 fn main() {
     HttpServer::new(|| {
         Application::new()
-            .resource("/health", |r| r.method(Method::GET).f(health))
+            .resource("/health", |r| r.method(Method::GET).f(health::health))
             .resource("/reviews/{product_id}", |r| r.method(Method::GET).f(index))
     }).bind("0.0.0.0:9080")
         .unwrap()
