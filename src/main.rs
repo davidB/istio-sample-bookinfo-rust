@@ -6,13 +6,13 @@ extern crate serde_derive;
 extern crate serde_json;
 
 extern crate actix_web;
-extern crate reqwest;
-#[macro_use]
-extern crate hyper;
+extern crate futures;
 
-use hyper::header::Headers;
+use actix_web::{error, httpcodes, Application, AsyncResponder, HttpMessage, HttpRequest,
+                HttpResponse, HttpServer, Method};
+use actix_web::client::ClientRequest;
+use futures::Future;
 
-use actix_web::{httpcodes, Application, HttpMessage, HttpRequest, HttpResponse, HttpServer, Method};
 mod health;
 
 #[derive(Debug, Serialize)]
@@ -34,60 +34,6 @@ struct Review {
     rating: Option<Rating>,
 }
 
-#[derive(Debug)]
-struct TrackingInfo {
-    x_request_id: Option<String>,
-    x_b3_traceid: Option<String>,
-    x_b3_spanid: Option<String>,
-    x_b3_parentspanid: Option<String>,
-    x_b3_sampled: Option<String>,
-    x_b3_flags: Option<String>,
-    x_ot_span_context: Option<String>,
-}
-impl TrackingInfo {
-    fn from_req(req: &HttpRequest) -> Self {
-        let headers = req.headers();
-
-        Self {
-            x_request_id: headers
-                .get("x-request-id")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_string()),
-            x_b3_traceid: headers
-                .get("x-b3-traceid")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_string()),
-            x_b3_spanid: headers
-                .get("x-b3-spanid")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_string()),
-            x_b3_parentspanid: headers
-                .get("x-b3-parentspanid")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_string()),
-            x_b3_sampled: headers
-                .get("x-b3-sampled")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_string()),
-            x_b3_flags: headers
-                .get("x-b3-flags")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_string()),
-            x_ot_span_context: headers
-                .get("x-ot-span-context")
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.to_string()),
-        }
-    }
-}
-header! { (XRequestId, "x-request-id") => [String] }
-header! { (XB3Traceid, "x-b3-traceid") => [String] }
-header! { (XB3Spanid, "x-B3-Spanid") => [String] }
-header! { (XB3Parentspanid, "x-b3-parentspanid") => [String] }
-header! { (XB3Sampled, "x-b3-sampled") => [String] }
-header! { (XB3Flags, "x-b3-flags") => [String] }
-header! { (XOtSpanContext, "x-ot-span-context") => [String] }
-
 #[derive(Debug, Deserialize)]
 struct RatingsResponse {
     id: u32,
@@ -100,71 +46,67 @@ struct RatingsPerUser {
     reviewer2: u8,
 }
 
-fn index(req: HttpRequest) -> HttpResponse {
+fn index(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = error::Error>> {
     let product_id = req.match_info()
         .get("product_id")
         .map(|v| v.parse().unwrap_or(0))
         .unwrap_or(0);
 
-    let baggage = TrackingInfo::from_req(&req);
-
-    let mut headers = Headers::new();
-    if let Some(value) = baggage.x_request_id {
-        headers.set(XRequestId(value));
-    }
-    if let Some(value) = baggage.x_b3_traceid {
-        headers.set(XB3Traceid(value));
-    }
-    if let Some(value) = baggage.x_b3_spanid {
-        headers.set(XB3Spanid(value));
-    }
-    if let Some(value) = baggage.x_b3_parentspanid {
-        headers.set(XB3Parentspanid(value));
-    }
-    if let Some(value) = baggage.x_b3_sampled {
-        headers.set(XB3Sampled(value));
-    }
-    if let Some(value) = baggage.x_b3_flags {
-        headers.set(XB3Flags(value));
-    }
-    if let Some(value) = baggage.x_ot_span_context {
-        headers.set(XOtSpanContext(value));
-    }
-
-    let client = reqwest::Client::new();
-    let ratings: RatingsResponse = client
-        .get(&format!(
-            "http://ratings:9080/ratings/{}",
-            product_id.clone()
-        ))
-        .headers(headers)
-        .send()
-        .unwrap()
-        .json()
+    let mut ratings_req = ClientRequest::get(&format!(
+        "http://ratings:9080/ratings/{}",
+        product_id.clone()
+    )).finish()
         .unwrap();
 
-    let review1 = Review {
-        reviewer: "RustReviewer1".to_string(),
-        text: "Rust rust rust rust rust rust rust rust rust rust, rust rust rust. Rust!"
-            .to_string(),
-        rating: Some(Rating {
-            stars: ratings.ratings.reviewer1,
-            color: "blue".to_string(),
-        }),
-    };
-    let review2 = Review {
-        reviewer: "RustReviewer2".to_string(),
-        text: "Rust.".to_string(),
-        rating: Some(Rating {
-            stars: ratings.ratings.reviewer2,
-            color: "green".to_string(),
-        }),
-    };
-    let product = Product {
-        id: product_id,
-        reviews: vec![review1, review2],
-    };
-    httpcodes::HTTPOk.build().json(product).unwrap()
+    for header in vec![
+        "x-b3-sampled",
+        "x-b3-flags",
+        "x-b3-traceid",
+        "x-b3-spanid",
+        "x-b3-parentspanid",
+        "x-request-id",
+        "x-ot-span-context",
+    ] {
+        if req.headers().contains_key(header) {
+            ratings_req
+                .headers_mut()
+                .insert(header, req.headers().get(header).unwrap().clone());
+        }
+    }
+
+    ratings_req
+        .send()
+        .map_err(error::Error::from)
+        .and_then(move |resp| {
+            resp.json()
+                .from_err()
+                .and_then(move |ratings: RatingsResponse| {
+                    let review1 = Review {
+                        reviewer: "RustReviewer1".to_string(),
+                        text:
+                            "Rust rust rust rust rust rust rust rust rust rust, rust rust rust. Rust!"
+                                .to_string(),
+                        rating: Some(Rating {
+                            stars: ratings.ratings.reviewer1,
+                            color: "blue".to_string(),
+                        }),
+                    };
+                    let review2 = Review {
+                        reviewer: "RustReviewer2".to_string(),
+                        text: "Rust.".to_string(),
+                        rating: Some(Rating {
+                            stars: ratings.ratings.reviewer2,
+                            color: "green".to_string(),
+                        }),
+                    };
+                    let product = Product {
+                        id: product_id,
+                        reviews: vec![review1, review2],
+                    };
+                    httpcodes::HTTPOk.build().json(product)
+                })
+        })
+        .responder()
 }
 
 fn main() {
