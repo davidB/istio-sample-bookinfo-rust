@@ -1,7 +1,17 @@
 #![deny(warnings)]
 
-extern crate env_logger;
+#[macro_use]
 extern crate log;
+/// Import longer-name versions of macros only to not collide with legacy `log`
+#[macro_use(slog_error, slog_warn, slog_info, slog_debug, slog_trace, slog_log, slog_o,
+            slog_record, slog_record_static, slog_b, slog_kv)]
+extern crate slog;
+extern crate slog_async;
+extern crate slog_envlogger;
+extern crate slog_json;
+extern crate slog_scope;
+extern crate slog_stdlog;
+extern crate slog_term;
 
 extern crate serde;
 #[macro_use]
@@ -11,10 +21,13 @@ extern crate serde_json;
 extern crate actix_web;
 extern crate futures;
 
+use actix_web::client::ClientRequest;
+use actix_web::middleware::Logger;
 use actix_web::{error, httpcodes, Application, AsyncResponder, HttpMessage, HttpRequest,
                 HttpResponse, HttpServer, Method};
-use actix_web::client::ClientRequest;
 use futures::Future;
+
+use slog::Drain;
 
 mod health;
 
@@ -47,6 +60,38 @@ struct RatingsResponse {
 struct RatingsPerUser {
     reviewer1: u8,
     reviewer2: u8,
+}
+
+fn init_log() -> slog::Logger {
+    // format
+    //let drain = slog_term::TermDecorator::new().build();
+    //let drain = slog_term::FullFormat::new(drain).build().fuse();
+    let drain = slog_json::Json::default(std::io::stderr()).fuse();
+
+    // configuration
+    let drain = slog_envlogger::new(drain);
+
+    // synchronization
+    let drain = slog_async::Async::new(drain).build().fuse();
+    //let drain = std::sync::Mutex::new(drain).fuse();
+
+    slog::Logger::root(drain, slog_o!("logger" => "app"))
+}
+
+fn demo_log() {
+    slog_error!(slog_scope::logger(), "slog error"; "k1" => 1, "k2" => "v2");
+    slog_warn!(slog_scope::logger(), "slog warn");
+    slog_info!(slog_scope::logger(), "slog info");
+    //info!(root_logger, "formatted: {}", 1; "log-key" => true);
+    //info!(root_logger, "printed {line_count} lines", line_count = 2);
+    slog_debug!(slog_scope::logger(), "slog {}", "debug");
+    slog_trace!(slog_scope::logger(), "slog {}", "trace");
+
+    error!("log error");
+    warn!("log warn");
+    info!("log info");
+    debug!("log {}", "debug");
+    trace!("log {}", "trace");
 }
 
 fn index(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = error::Error>> {
@@ -113,13 +158,25 @@ fn index(req: HttpRequest) -> Box<Future<Item = HttpResponse, Error = error::Err
 }
 
 fn main() {
-    env_logger::init();
+    //env_logger::init();
+    let root_logger = init_log();
+    let _scope_guard = slog_scope::set_global_logger(root_logger);
+    let _log_guard = slog_stdlog::init().unwrap();
 
+    demo_log();
+
+    slog_scope::scope(&slog_scope::logger().new(slog_o!("scope" => "1")), || run());
+}
+
+fn run() {
+    let addr = "0.0.0.0:9080";
+    slog_info!(slog_scope::logger(), "slog info";"address" => addr);
     HttpServer::new(|| {
         Application::new()
+            .middleware(Logger::default())
             .resource("/health", |r| r.method(Method::GET).f(health::health))
             .resource("/reviews/{product_id}", |r| r.method(Method::GET).f(index))
-    }).bind("0.0.0.0:9080")
+    }).bind(addr)
         .unwrap()
         .run();
 }
